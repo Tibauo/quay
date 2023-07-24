@@ -1,0 +1,198 @@
+---
+# tasks file for quay
+- name: Ensure Satellite is defines in /etc/hosts
+  lineinfile:
+    path: /etc/hosts
+    regexp: "^{{ ansible_default_ipv4.address }}"
+    line: "{{ansible_default_ipv4.address }} {{ ansible_fqdn }} {{ ansible_hostname }}"
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: create directory postgres
+  ansible.builtin.file:
+    path: "{{ QUAY }}/postgres-quay"
+    state: directory
+    recurse: yes
+
+- name: Set ACL
+  ansible.posix.acl:
+    path:  "{{ QUAY }}/postgres-quay"
+    entity: 26
+    etype: user
+    permissions: -wx
+    state: present
+
+- name: Start Container postgresql quay
+  containers.podman.podman_container:
+    name: postgresql-quay
+    image: "{{ postgresql }}"
+    ports:
+      "5432:5432" 
+    volume: 
+      - "{{ QUAY }}/postgres-quay:/var/lib/pgsql/data:Z"
+    env:
+      POSTGRESQL_USER={{ postgres_user }}
+      POSTGRESQL_PASSWORD={{ postgres_pass }}
+      POSTGRESQL_ADMIN_PASSWORD={{ postgres_admin_pass }}
+      POSTGRESQL_DATABASE={{ postgres_db }}
+    state: started
+
+- name: wait container start before the next step
+  ansible.builtin.pause:
+    seconds: 3
+
+- name: configure DB
+  command: podman exec -it postgresql-quay /bin/bash -c 'echo "CREATE EXTENSION IF NOT EXISTS pg_trgm" | psql -d quay -U postgres'
+
+- name: Start Container redis
+  containers.podman.podman_container:
+    name: redis
+    image: "{{ redis }}"
+    ports:
+      "6379:6379"
+    env:
+      REDIS_PASSWORD={{ redis_pass }}
+    state: started
+
+- name: Configure Cert directory
+  ansible.builtin.file:
+    path: "{{ QUAY }}/config/extra_ca_certs"
+    state: directory
+    recurse: yes
+
+- name: create storage directory
+  ansible.builtin.file:
+    path: "{{ QUAY }}/storage"
+    state: directory
+    recurse: yes
+
+- name: Set ACL storage directory
+  ansible.posix.acl:
+    path:  "{{ QUAY }}/storage"
+    entity: 1001
+    etype: user
+    permissions: -wx
+    state: present
+
+- name: Push template of quay
+  ansible.builtin.template:
+    src: config.yaml.j2
+    dest: "{{ QUAY }}/config/config.yaml"
+
+- name: Start Container mirroring quay
+  containers.podman.podman_container:
+    name: "mirroring-worker"
+    image: "{{ mirror_worker }}"
+    volume:
+      - "{{ QUAY }}/config:/conf/stack:Z"
+    command: repomirror
+    state: started
+
+- name: Create clairv4 directory
+  ansible.builtin.file:
+    path: "{{ clair_directory }}"
+    state: directory
+    recurse: yes
+
+- name: Push template of clairv4
+  ansible.builtin.template:
+    src: clair.config.yaml.j2
+    dest: "{{ clair_directory }}/config.yaml"
+
+- name: Copy rootCA
+  ansible.builtin.copy:
+    src: "{{ rootCA_dir }}"
+    dest: "{{ item }}"
+  loop:
+    - "{{ clair_directory }}/ac.crt"
+    - /etc/pki/ca-trust/source/anchors/rootCA.crt
+
+- name: Update CA Trust
+  ansible.builtin.shell:
+    cmd: update-ca-trust
+
+- name: create directory postgres clairv4
+  ansible.builtin.file:
+    path: "{{ QUAY }}/postgres-clairv4"
+    state: directory
+    recurse: yes
+
+- name: Set ACL
+  ansible.posix.acl:
+    path:  "{{ QUAY }}/postgres-clairv4"
+    entity: 26
+    etype: user
+    permissions: -wx
+    state: present
+
+- name: Start Container postgresql clairv4
+  containers.podman.podman_container:
+    name: postgresql-clairv4
+    image: "{{ postgresql }}"
+    ports:
+      "5433:5432" 
+    volume: 
+      - "{{ QUAY }}/postgres-clairv4:/var/lib/pgsql/data:Z"
+    env:
+      POSTGRESQL_USER={{ postgres_db_clair_user }}
+      POSTGRESQL_PASSWORD={{ postgres_db_clair_pass }}
+      POSTGRESQL_ADMIN_PASSWORD={{ postgres_admin_pass }}
+      POSTGRESQL_DATABASE={{ postgres_db_clair }}
+    state: started
+  ignore_errors: true
+
+- name: wait container start before the next step
+  ansible.builtin.pause:
+    seconds: 5
+
+- name: configure DB
+  command: podman exec -it postgresql-clairv4 /bin/bash -c 'echo "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\"" | psql -d clair -U postgres'
+
+- name: Start Container clairv4
+  containers.podman.podman_container:
+    name: clairv4
+    image: "{{ clair }}"
+    ports:
+      - "8081:8081"
+      - "8089:8089"
+    volume:
+      - "{{ clair_directory }}:/clair:Z"
+    env:
+      CLAIR_CONF=/clair/config.yaml
+      CLAIR_MODE=combo
+      SSL_CERT_DIR=/etc/ssl/certs:/etc/pki/tls/certs:/var/run/certs:/clair
+    state: started
+  ignore_errors: true
+
+- name: wait container start mirroring quay. Mandatory to start the quay container
+  ansible.builtin.pause:
+    seconds: 15
+
+- name: Copy key and cert
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "{{ item.dst }}"
+    owner: root
+    group: root
+    mode: '0755'
+  loop:
+    - { src: "{{ ssl_crt_dir }}", dst: "{{ QUAY }}/config/ssl.cert" }
+    - { src: "{{ ssl_key_dir }}", dst: "{{ QUAY }}/config/ssl.key" }
+    - { src: "{{ ssl_crt_dir }}", dst: "{{ QUAY }}/config/extra_ca_certs/quay.monlab.local.crt" }
+
+- name: Start Container Quay
+  containers.podman.podman_container:
+    name: quay
+    image: "{{ quay }}"
+    ports:
+      - "80:8080"
+      - "443:8443"
+    volume:
+      - "{{ QUAY }}/config:/conf/stack:Z"
+      - "{{ QUAY }}/storage:/datastorage:Z"
+    state: started
+
+- name: Print the gateway for each host when defined
+  ansible.builtin.debug:
+    msg: "Create the same user defined in the variables and follow this step to get your first token : https://access.redhat.com/documentation/en-us/red_hat_quay/3.7/html/red_hat_quay_api_guide/using_the_red_hat_quay_api#create_oauth_access_token"

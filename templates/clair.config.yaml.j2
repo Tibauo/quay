@@ -1,0 +1,32 @@
+http_listen_addr: :8081
+introspection_addr: :8089
+log_level: debug
+indexer:
+  connstring: host={{ ansible_fqdn }} port=5433 dbname={{ postgres_db_clair }} user={{ postgres_db_clair_user }} password={{ postgres_db_clair_pass }} sslmode=disable
+  scanlock_retry: 10
+  layer_scan_concurrency: 5
+  migrations: true
+matcher:
+  connstring: host={{ ansible_fqdn }} port=5433 dbname={{ postgres_db_clair }} user={{ postgres_db_clair_user }} password={{ postgres_db_clair_pass }} sslmode=disable
+  max_conn_pool: 100
+  run: ""
+  migrations: true
+  indexer_addr: clair-indexer
+notifier:
+  connstring: host={{ ansible_fqdn }} port=5433 dbname={{ postgres_db_clair }} user={{ postgres_db_clair_user }} password={{ postgres_db_clair_pass }} sslmode=disable
+  delivery_interval: 1m
+  poll_interval: 5m
+  migrations: true
+auth:
+  psk:
+    key: "{{ psk_key }}"
+    iss: ["quay"]
+# tracing and metrics
+trace:
+  name: "jaeger"
+  probability: 1
+  jaeger:
+    agent_endpoint: "{{ ansible_fqdn }}:6831"
+    service_name: "clair"
+metrics:
+  name: "prometheus"
