@@ -1,6 +1,6 @@
-# Apache
+# Quay
 
-Install & configure apache
+Install & configure Quay
 
 ## Requirements
 Podman is installed
